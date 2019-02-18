@@ -2,6 +2,7 @@ from agent_dir.agent import Agent
 
 import os
 import random
+import math
 import numpy as np
 import h5py
 import tensorflow as tf
@@ -13,6 +14,9 @@ import keras.backend as K
 from keras.layers import Lambda
 
 from keras.backend.tensorflow_backend import set_session
+
+import matplotlib.pyplot as plt
+from scipy.ndimage.filters import gaussian_filter
 
 random.seed(1)
 np.random.seed(1)
@@ -102,11 +106,21 @@ class Agent_DQN(Agent):
 
         # Set target_network weight
         self.target_network.set_weights(self.q_network.get_weights())
-            
+
+        # Initialise attention masks.
+        self.masks = {}
+        for i in range(0, 84, 5):
+            for j in range(0, 84, 5):
+                self.masks[(i, j)] = self.gauss2D((84, 84), i, j, 5)
+
+        plt.ion()
+
+        plt.show(False)
+
+        plt.draw()
 
     def init_game_setting(self):
         pass
-
 
     def train(self):
         while self.t <= self.num_steps:
@@ -121,7 +135,24 @@ class Agent_DQN(Agent):
                 observation, reward, terminal, _ = self.env.step(action)
                 self.run(last_observation, action, reward, terminal, observation)
         
+    @staticmethod
+    def gauss2D(size, mu_x, mu_y, sigma):
+        """
+        2D gaussian mask - should give the same result as MATLAB's
+        fspecial('gaussian',[shape],[sigma])
+        """
+        probs_x = [math.exp(-z * z / (2 * sigma * sigma)) / math.sqrt(2 * math.pi * sigma * sigma)
+                   for z in range(-mu_x, size[0]-mu_x)]
+        probs_y = [math.exp(-z * z / (2 * sigma * sigma)) / math.sqrt(2 * math.pi * sigma * sigma)
+                   for z in range(-mu_y, size[1]-mu_y)]
 
+        mask = np.outer(probs_y, probs_x)
+        mask /= np.max(mask)
+        return mask
+
+    @staticmethod
+    def pertubated_image(image, mask):
+        return np.multiply(image, 1 - mask) + np.multiply(gaussian_filter(image, sigma=5), mask)
 
     def make_action(self, observation, test=True):
         """
@@ -136,9 +167,9 @@ class Agent_DQN(Agent):
         """
         if not test:
             if self.epsilon >= random.random() or self.t < self.initial_replay_size:
-               action = random.randrange(self.num_actions)
+                action = random.randrange(self.num_actions)
             else:
-                action = np.argmax(self.q_network.predict([np.expand_dims(observation,axis=0),self.dummy_input])[0])
+                action = np.argmax(self.q_network.predict([np.expand_dims(observation, axis=0), self.dummy_input])[0])
             # Anneal epsilon linearly over time
             if self.epsilon > self.final_epsilon and self.t >= self.initial_replay_size:
                 self.epsilon -= self.epsilon_step
@@ -146,8 +177,20 @@ class Agent_DQN(Agent):
             if 0.005 >= random.random():
                 action = random.randrange(self.num_actions)
             else:
-                action = np.argmax(self.q_network.predict([np.expand_dims(observation,axis=0),self.dummy_input])[0])
-
+                max_q = np.max(self.q_network.predict([np.expand_dims(observation, axis=0), self.dummy_input])[0])
+                attention_matrix = np.zeros(shape=(84, 84))
+                for k in self.masks:
+                    observation_pertubated = \
+                        self.pertubated_image(observation[:, :, 0], self.masks[k]).reshape(84, 84, 1)
+                    for i in range(1, 4):
+                        observation_pertubated = np.append(observation_pertubated,
+                                  self.pertubated_image(observation[:, :, i], self.masks[k]).reshape(84, 84, 1), axis=2)
+                    max_q_pertubated = np.max(self.q_network.predict([np.expand_dims(observation_pertubated, axis=0),
+                                                                      self.dummy_input])[0])
+                    attention_matrix[k[0], k[1]] = 0.5 * (max_q - max_q_pertubated) ** 2
+                plt.imshow(attention_matrix, cmap='gray')
+                # plt.show()
+                action = np.argmax(self.q_network.predict([np.expand_dims(observation, axis=0), self.dummy_input])[0])
         return action
 
     def build_network(self):
