@@ -1,5 +1,6 @@
 from agent_dir.agent import Agent
 
+import cv2
 import os
 import random
 import math
@@ -17,11 +18,15 @@ from keras.backend.tensorflow_backend import set_session
 
 import matplotlib.pyplot as plt
 from scipy.ndimage.filters import gaussian_filter
+from sklearn import preprocessing
 
 random.seed(1)
 np.random.seed(1)
 tf.reset_default_graph()
 tf.set_random_seed(1)
+
+WIDTH = 160
+HEIGHT = 210
 
 # reference : https://github.com/tokb23/dqn/blob/master/dqn.py
 
@@ -108,10 +113,11 @@ class Agent_DQN(Agent):
         self.target_network.set_weights(self.q_network.get_weights())
 
         # Initialise attention masks.
+        pixel_skipped = 5
         self.masks = {}
-        for i in range(0, 84, 5):
-            for j in range(0, 84, 5):
-                self.masks[(i, j)] = self.gauss2D((84, 84), i, j, 5)
+        for i in range(0, HEIGHT, pixel_skipped):
+            for j in range(0, WIDTH, pixel_skipped):
+                self.masks[(i, j)] = self.gauss2D((WIDTH, HEIGHT), i, j, 5)
 
         plt.ion()
 
@@ -152,7 +158,21 @@ class Agent_DQN(Agent):
 
     @staticmethod
     def pertubated_image(image, mask):
-        return np.multiply(image, 1 - mask) + np.multiply(gaussian_filter(image, sigma=5), mask)
+        return np.array(np.multiply(image, 1 - mask) + np.multiply(gaussian_filter(image, sigma=5), mask), dtype=np.uint8)
+
+    @staticmethod
+    def preprocess(observation):
+        obs_tmp = np.array([])
+        for i in range(4):
+            frame = observation[:, :, i * 3:i * 3 + 3]
+            frame = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+            frame = cv2.resize(frame, (84, 84), interpolation=cv2.INTER_AREA)
+            frame = frame[:, :, None]
+            if i == 0:
+                obs_tmp = frame
+            else:
+                obs_tmp = np.append(obs_tmp, frame, axis=2)
+        return obs_tmp
 
     def make_action(self, observation, test=True):
         """
@@ -169,7 +189,7 @@ class Agent_DQN(Agent):
             if self.epsilon >= random.random() or self.t < self.initial_replay_size:
                 action = random.randrange(self.num_actions)
             else:
-                action = np.argmax(self.q_network.predict([np.expand_dims(observation, axis=0), self.dummy_input])[0])
+                action = np.argmax(self.q_network.predict([np.expand_dims(Agent_DQN.preprocess(observation), axis=0), self.dummy_input])[0])
             # Anneal epsilon linearly over time
             if self.epsilon > self.final_epsilon and self.t >= self.initial_replay_size:
                 self.epsilon -= self.epsilon_step
@@ -177,20 +197,27 @@ class Agent_DQN(Agent):
             if 0.005 >= random.random():
                 action = random.randrange(self.num_actions)
             else:
-                max_q = np.max(self.q_network.predict([np.expand_dims(observation, axis=0), self.dummy_input])[0])
-                attention_matrix = np.zeros(shape=(84, 84))
+                max_q = np.max(self.q_network.predict([np.expand_dims(Agent_DQN.preprocess(observation), axis=0), self.dummy_input])[0])
+                attention_matrix = np.zeros(shape=(HEIGHT, WIDTH))
                 for k in self.masks:
                     observation_pertubated = \
-                        self.pertubated_image(observation[:, :, 0], self.masks[k]).reshape(84, 84, 1)
-                    for i in range(1, 4):
+                        self.pertubated_image(observation[:, :, 0], self.masks[k]).reshape(HEIGHT, WIDTH, 1)
+                    for i in range(1, 12):
                         observation_pertubated = np.append(observation_pertubated,
-                                  self.pertubated_image(observation[:, :, i], self.masks[k]).reshape(84, 84, 1), axis=2)
-                    max_q_pertubated = np.max(self.q_network.predict([np.expand_dims(observation_pertubated, axis=0),
+                                  self.pertubated_image(observation[:, :, i], self.masks[k]).reshape(HEIGHT, WIDTH, 1), axis=2)
+                    max_q_pertubated = np.max(self.q_network.predict([np.expand_dims(Agent_DQN.preprocess(observation_pertubated), axis=0),
                                                                       self.dummy_input])[0])
                     attention_matrix[k[0], k[1]] = 0.5 * (max_q - max_q_pertubated) ** 2
-                plt.imshow(attention_matrix, cmap='gray')
-                # plt.show()
-                action = np.argmax(self.q_network.predict([np.expand_dims(observation, axis=0), self.dummy_input])[0])
+                print("Frame rendered.")
+                frame_with_attention = observation[:, :, 9:12]
+                frame_with_attention = frame_with_attention / np.max(frame_with_attention)
+                frame_with_attention[:, :, 1] += preprocessing.normalize(attention_matrix)
+                np.set_printoptions(threshold=np.nan)
+                print(preprocessing.normalize(attention_matrix))
+                plt.imshow(frame_with_attention)
+                # plt.show(True)
+
+                action = np.argmax(self.q_network.predict([np.expand_dims(Agent_DQN.preprocess(observation), axis=0), self.dummy_input])[0])
         return action
 
     def build_network(self):
